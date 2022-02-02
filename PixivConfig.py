@@ -281,9 +281,9 @@ class PixivConfig():
             try:
                 value = item.process_value(value)
             except ValueError:
-                print(Fore.RED + Style.BRIGHT + f"{sys.exc_info()}" + Style.RESET_ALL)
+                print(f"{sys.exc_info()}")
                 self.__logger.exception('Error at process_value() of : %s', item.option)
-                print(Fore.YELLOW + Style.BRIGHT + f"{item.option} = {item.default}" + Style.RESET_ALL)
+                print(f"{item.option} = {item.default}")
                 value = item.default
                 haveError = True
 
@@ -291,7 +291,7 @@ class PixivConfig():
             self.__setattr__(item.option, value)
 
         if haveError:
-            print(Fore.RED + Style.BRIGHT + 'Configurations with invalid value are set to default value.' + Style.RESET_ALL)
+            print('Configurations with invalid value are set to default value.')
             self.writeConfig(error=True, path=self.configFileLocation)
 
         print('Configuration loaded.')

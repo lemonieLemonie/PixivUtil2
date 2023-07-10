@@ -65,8 +65,11 @@ class FanboxPost(object):
         self.linkToFile = dict()
 
         self.parsePost(page)
+        self.parse_post_details(page)
 
-        if not self.is_restricted:
+    def parse_post_details(self, page):
+        # Issue #1094
+        if not self.is_restricted and "body" in page:
             self.parseBody(page)
 
             if self.type == 'image':
@@ -88,7 +91,14 @@ class FanboxPost(object):
     def parsePost(self, jsPost):
         self.imageTitle = jsPost["title"]
 
-        coverUrl = jsPost["coverImageUrl"]
+        # Issue 1181
+        if jsPost.get("coverImageUrl"):
+            coverUrl = jsPost["coverImageUrl"]
+        else:
+            if jsPost.get("cover") and jsPost["cover"] is not None and jsPost["cover"]["type"] == "cover_image":
+                coverUrl = jsPost["cover"]["url"]
+            else:
+                coverUrl = None
         # Issue #930
         if not self.coverImageUrl and coverUrl:
             self.coverImageUrl = _re_fanbox_cover.sub("fanbox", coverUrl)
@@ -106,13 +116,22 @@ class FanboxPost(object):
         if self._tzInfo is not None:
             self.worksDateDateTime = self.worksDateDateTime.astimezone(self._tzInfo)
 
-        self.type = jsPost["type"]
-        if self.type not in FanboxPost._supportedType:
-            raise PixivException(f"Unsupported post type = {self.type} for post = {self.imageId}", errorCode=9999, htmlPage=jsPost)
+        # Issue #1094
+        if "type" in jsPost:
+            self.type = jsPost["type"]
+            if self.type not in FanboxPost._supportedType:
+                raise PixivException(f"Unsupported post type = {self.type} for post = {self.imageId}", errorCode=9999, htmlPage=jsPost)
+        else:
+            # assume it is image post
+            self.type = "image"
 
         self.likeCount = int(jsPost["likeCount"])
-        if jsPost["body"] is None:
+
+        # Issue #1094
+        if "body" not in jsPost or jsPost["body"] is None:
             self.is_restricted = True
+        if "isRestricted" in jsPost:
+            self.is_restricted = jsPost["isRestricted"]
 
     def parseBody(self, jsPost):
         ''' Parse general data for text and article'''
@@ -265,12 +284,77 @@ class FanboxPost(object):
                             self.try_add(link.group(), self.descriptionUrlList)
                     else:
                         PixivHelper.print_and_log("warn", f"Found missing embedId: {embedId} for {self.imageId}")
+                elif block["type"] == "url_embed":  # Issue #1087
+                    urlEmbedId = block["urlEmbedId"]
+                    if urlEmbedId in jsPost["body"]["urlEmbedMap"]:
+                        result = self.get_embed_url_data(jsPost["body"]["urlEmbedMap"][urlEmbedId], jsPost)
+                        self.body_text += "\n" + result
+                        # embedType = jsPost["body"]["urlEmbedMap"][urlEmbedId]["type"]
+                        # if embedType == "html.card":
+                        #     embedStr = jsPost["body"]["urlEmbedMap"][urlEmbedId]["html"]
+                        #     self.body_text += f"<p>{embedStr}</p>"
+                        #     links = _url_pattern.finditer(embedStr)
+                        #     for link in links:
+                        #         self.try_add(link.group(), self.descriptionUrlList)
+                        # else:
+                        #     PixivHelper.print_and_log("warn", f"Unknown urlEmbedId's type: {urlEmbedId} for {self.imageId} => {embedType}")
+                    else:
+                        PixivHelper.print_and_log("warn", f"Found missing urlEmbedId: {urlEmbedId} for {self.imageId}")
 
         # Issue #476
         if "video" in jsPost["body"]:
             self.body_text += u"{0}<br />{1}".format(
                 self.body_text,
                 self.getEmbedData(jsPost["body"]["video"], jsPost))
+
+    def get_embed_url_data(self, embedData, jsPost) -> str:
+        # Issue #1133
+        content_provider_path = os.path.abspath(os.path.dirname(sys.executable) + os.sep + "content_provider.json")
+        if not os.path.exists(content_provider_path):
+            content_provider_path = os.path.abspath("./content_provider.json")
+        if not os.path.exists(content_provider_path):
+            raise PixivException(f"Missing content_provider.json, please get it from https://github.com/Nandaka/PixivUtil2/blob/master/content_provider.json! Expected location => {content_provider_path}",
+                                 errorCode=PixivException.MISSING_CONFIG,
+                                 htmlPage=None)
+
+        cfg = demjson3.decode_file(content_provider_path)
+        embed_cfg = cfg["urlEmbedConfig"]
+        current_provider = embedData["type"]
+
+        if current_provider in embed_cfg:
+            if embed_cfg[current_provider]["ignore"]:
+                return ""
+
+            # get urls from given keys
+            for key in embed_cfg[current_provider]["get_link_keys"]:
+                js_keys = key.split(".")
+                root = embedData
+                for js_key in js_keys:
+                    root = root[js_key]
+                links = _url_pattern.finditer(root)
+                for link in links:
+                    self.try_add(link.group(), self.descriptionUrlList)
+
+            # get all the keys to list
+            keys = list()
+            for key in embed_cfg[current_provider]["keys"]:
+                js_keys = key.split(".")
+                root = embedData
+                for js_key in js_keys:
+                    if js_key == "cover" and (root["cover"] is None or root["cover"]["type"] != "cover_image"):
+                        root = None
+                        break
+                    else:
+                        root = root[js_key]
+                keys.append(root)
+            template = embed_cfg[current_provider]["format"]
+
+            result = template.format(*keys)
+            return result
+
+        else:
+            msg = f"Unsupported url embed provider = {embedData['type']} for post = {self.imageId}, please update content_provider.json."
+            raise PixivException(msg, errorCode=9999, htmlPage=jsPost)
 
     def getEmbedData(self, embedData, jsPost) -> str:
         # Issue #881
@@ -300,15 +384,11 @@ class FanboxPost(object):
                 content_format = embed_cfg[current_provider]["format"]
                 return content_format.format(content_id)
             else:
-                msg = "Empty content_id for embed provider = {0} for post = {1}, please update content_provider.json."
-                raise PixivException(msg.format(embedData["serviceProvider"], self.imageId),
-                                     errorCode=9999,
-                                     htmlPage=jsPost)
+                msg = f"Empty content_id for embed provider = {embedData['serviceProvider']} for post = {self.imageId}, please update content_provider.json."
+                raise PixivException(msg, errorCode=9999, htmlPage=jsPost)
         else:
-            msg = "Unsupported embed provider = {0} for post = {1}, please update content_provider.json."
-            raise PixivException(msg.format(embedData["serviceProvider"], self.imageId),
-                                 errorCode=9999,
-                                 htmlPage=jsPost)
+            msg = f"Unsupported embed provider = {embedData['serviceProvider']} for post = {self.imageId}, please update content_provider.json."
+            raise PixivException(msg, errorCode=9999, htmlPage=jsPost)
 
     def parseImages(self, jsPost):
         for image in jsPost["body"]["images"]:
@@ -363,6 +443,10 @@ class FanboxPost(object):
             info.write("Urls          =\r\n")
             for link in self.embeddedFiles:
                 info.write(" - {0}\r\n".format(link))
+        if len(self.embeddedFiles) > 0:
+            info.write("descriptionUrlList =\r\n")
+            for link in self.descriptionUrlList:
+                info.write(" - {0}\r\n".format(link))
         info.close()
 
     def WriteHtml(self, html_template, useAbsolutePaths, filename):
@@ -389,11 +473,11 @@ class FanboxPost(object):
         if self.type == "article":
             token_body_text = f'<div class="article caption">{self.body_text}</div>'
         else:
-            token_images = '<div class="non-article images">{0}</div>'.format(
-                "".join(['<a href="{0}">{1}</a>'.format(x,
-                f'<img scr="{0}"/>' if x[x.rindex(".") + 1:].lower() in ["jpg", "jpeg", "png", "bmp", "gif"] else x) for x in self.images]))
-            token_text = '<div class="non-article caption">{0}</div>'.format(
-                "".join(['<p>{0}</p>'.format(x.rstrip()) for x in self.body_text.split("\n")]))
+            images = "".join(['<a href="{0}">{1}</a>'.format(x,
+                             f'<img scr="{0}"/>' if x[x.rindex(".") + 1:].lower() in ["jpg", "jpeg", "png", "bmp", "gif"] else x) for x in self.images])
+            token_images = f'<div class="non-article images">{images}</div>'
+            text = "".join(['<p>{0}</p>'.format(x.rstrip()) for x in self.body_text.split("\n")])
+            token_text = f'<div class="non-article caption">{text}</div>'
 
         page = page.replace("%body_text(article)%", token_body_text)
         page = page.replace("%images(non-article)%", token_images)
@@ -433,6 +517,7 @@ class FanboxArtist(object):
     # require additional API call
     artistName = ""
     artistToken = ""
+    fanbox_name = ""
 
     SUPPORTING = 0
     FOLLOWING = 1
@@ -459,6 +544,8 @@ class FanboxArtist(object):
         self.artistName = artist_name
         self.creatorId = creator_id
         self._tzInfo = tzInfo
+        # Issue #1117 Fanbox name might be different with Pixiv name
+        self.fanbox_name = artist_name
 
     def __str__(self):
         return f"FanboxArtist({self.artistId}, {self.creatorId}, {self.artistName})"

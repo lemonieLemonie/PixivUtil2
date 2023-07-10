@@ -74,7 +74,7 @@ class PixivImage (object):
     descriptionUrlList = []
     __re_caption = re.compile("caption")
     _tzInfo = None
-    tags = list()
+    tags: PixivTagData = list()
 
     # only applicable for manga series
     manga_series_order: int = -1
@@ -83,6 +83,9 @@ class PixivImage (object):
     # Issue #1064 titleCaptionTranslation
     translated_work_title = ""
     translated_work_caption = ""
+
+    # Issue #1189
+    ai_type = -1
 
     def __init__(self,
                  iid=0,
@@ -152,7 +155,7 @@ class PixivImage (object):
                 self.artist = PixivArtist(temp_artist_id, page, fromImage=True)
 
             if fromBookmark and self.originalArtist is None:
-                assert(self.artist is not None)
+                assert (self.artist is not None)
                 self.originalArtist = PixivArtist(page=page, fromImage=True)
                 print("From Artist Bookmark: {0}".format(self.artist.artistId))
                 print("Original Artist: {0}".format(self.originalArtist.artistId))
@@ -164,7 +167,7 @@ class PixivImage (object):
 
     def ParseInfo(self, page, writeRawJSON):
         key = list(page["illust"].keys())[0]
-        assert(str(key) == str(self.imageId))
+        assert (str(key) == str(self.imageId))
         root = page["illust"][key]
         # save the JSON if writeRawJSON is enabled
         if writeRawJSON:
@@ -254,7 +257,10 @@ class PixivImage (object):
 
         # Strip HTML tags from caption once they have been collected by the above statement.
         if self.stripHTMLTagsFromCaption:
-            self.imageCaption = BeautifulSoup(self.imageCaption, "lxml").text
+            caption_element = BeautifulSoup(self.imageCaption, features="html5lib")
+            self.imageCaption = caption_element.text
+            caption_element.decompose()
+            del caption_element
 
         # Issue #1064
         if "titleCaptionTranslation" in root:
@@ -268,7 +274,16 @@ class PixivImage (object):
                 self.translated_work_caption = root["titleCaptionTranslation"]["workCaption"]
                 self.parse_url_from_caption(self.translated_work_caption)
                 if self.stripHTMLTagsFromCaption:
-                    self.translated_work_caption = BeautifulSoup(self.translated_work_caption, "lxml").text
+                    caption_element = BeautifulSoup(self.translated_work_caption, features="html5lib")
+                    self.translated_work_caption = caption_element.text
+                    caption_element.decompose()
+                    del caption_element
+
+        # Feature #1189
+        if "aiType" in root:
+            self.ai_type = int(root["aiType"])  # 1 == non-AI, 2 == AI-generated
+            if self.ai_type == 2:
+                self.imageTags.insert(0, "AI-generated")
 
     def parse_url_from_caption(self, caption_to_parse):
         parsed = BeautifulSoup(caption_to_parse, features="html5lib")
@@ -300,7 +315,7 @@ class PixivImage (object):
         # need to be minified
         self.ugoira_data = json.dumps(js, separators=(',', ':'))  # ).replace("/", r"\/")
 
-        assert(len(self.ugoira_data) > 0)
+        assert (len(self.ugoira_data) > 0)
         return js["src"]
 
     def IsNotLoggedIn(self, page):
@@ -433,7 +448,7 @@ class PixivImage (object):
 
         info.close()
 
-    def WriteJSON(self, filename, JSONfilter):
+    def WriteJSON(self, filename, JSONfilter, use_translated_tag, locale):
         info = None
         try:
             # Issue #421 ensure subdir exists.
@@ -461,7 +476,12 @@ class PixivImage (object):
                 jsonInfo["Series Data"] = self.seriesNavData
             jsonInfo["Title"] = self.imageTitle
             jsonInfo["Caption"] = self.imageCaption
-            jsonInfo["Tags"] = self.imageTags
+
+            if use_translated_tag:
+                jsonInfo["Tags"] = self.get_translated_tags(locale)
+            else:
+                jsonInfo["Tags"] = self.imageTags
+
             jsonInfo["Image Mode"] = self.imageMode
             jsonInfo["Pages"] = self.imageCount
             jsonInfo["Date"] = self.js_createDate
@@ -477,13 +497,12 @@ class PixivImage (object):
             info.write(json.dumps(jsonInfo, ensure_ascii=False, indent=4))
             info.close()
 
-    def WriteXMP(self, filename):
+    def WriteXMP(self, filename, use_translated_tag, locale):
         import pyexiv2
-        import tempfile
+        # import tempfile
 
         # need to use temp file due to bad unicode support for pyexiv2 in windows
-        d = tempfile.mkdtemp(prefix="xmp")
-        d = d.replace(os.sep, '/')
+        d = PixivHelper.create_temp_dir(prefix="xmp")
         tempname = f"{d}/{self.imageId}.xmp"
 
         info = codecs.open(tempname, 'wb', encoding='utf-8')
@@ -505,7 +524,11 @@ class PixivImage (object):
             info_dict['Xmp.dc.description'] = self.imageCaption
         # Check array isn't empty.
         if self.imageTags:
-            info_dict['Xmp.dc.subject'] = self.imageTags
+            # Feature #1216
+            if use_translated_tag:
+                info_dict['Xmp.dc.subject'] = self.get_translated_tags(locale)
+            else:
+                info_dict['Xmp.dc.subject'] = self.imageTags
         info_dict['Xmp.dc.date'] = [self.worksDateDateTime]
         info_dict['Xmp.dc.source'] = f"http://www.pixiv.net/en/artworks/{self.imageId}"
         info_dict['Xmp.dc.identifier'] = self.imageId
@@ -606,6 +629,23 @@ class PixivImage (object):
 
         payload = demjson3.decode(jss["content"])
         return payload
+
+    def get_translated_tags(self, locale):  # Feature #1216
+        translated_tags = list()
+        for tag in self.imageTags:
+            found = False
+            for tl_tag in self.tags:  # type: PixivTagData
+                if tl_tag.tag == tag:
+                    translated_tags.append(tl_tag.get_translation(locale))
+                    found = True
+                    break
+                elif tl_tag.translation_data and tl_tag.translation_data[locale] == tag:
+                    translated_tags.append(tl_tag.translation_data[locale])
+                    found = True
+                    break
+            if not found:
+                translated_tags.append(tag)
+        return translated_tags
 
 
 class PixivMangaSeries:

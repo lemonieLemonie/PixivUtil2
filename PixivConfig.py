@@ -63,7 +63,7 @@ class PixivConfig():
         ConfigItem("Network", "timeout", 60),
         ConfigItem("Network", "retry", 3),
         ConfigItem("Network", "retryWait", 5),
-        ConfigItem("Network", "downloadDelay", 2),
+        ConfigItem("Network", "downloadDelay", 5),
         ConfigItem("Network", "checkNewVersion", True),
         ConfigItem("Network", "notifyBetaVersion", True),
         ConfigItem("Network", "openNewVersion", True),
@@ -77,6 +77,8 @@ class PixivConfig():
         ConfigItem("Debug", "dumpMediumPage", False),
         ConfigItem("Debug", "dumpTagSearchPage", False),
         ConfigItem("Debug", "debugHttp", False),
+        ConfigItem("Debug", "disableLog", False),
+        ConfigItem("Debug", "disableScreenClear", False),
 
         ConfigItem("IrfanView", "IrfanViewPath", r"C:\Program Files\IrfanView", followup=os.path.expanduser),
         ConfigItem("IrfanView", "startIrfanView", False),
@@ -90,8 +92,8 @@ class PixivConfig():
         ConfigItem("Settings", "downloadAvatar", False),
         ConfigItem("Settings", "useSuppressTags", False),
         ConfigItem("Settings", "tagsLimit", -1),
-        ConfigItem("Settings", "writeImageInfo", False),
         ConfigItem("Settings", "writeImageJSON", False),
+        ConfigItem("Settings", "writeImageInfo", False),
         ConfigItem("Settings", "writeRawJSON", False),
         ConfigItem("Settings", "RawJSONFilter",
                    "id,title,description,alt,userIllusts,storableTags,zoneConfig,extraData,comicPromotion,fanboxPromotion"),
@@ -105,6 +107,7 @@ class PixivConfig():
         ConfigItem("Settings", "dbPath", ""),
         ConfigItem("Settings", "setLastModified", True),
         ConfigItem("Settings", "useLocalTimezone", False),
+        ConfigItem("Settings", "defaultSketchOption", ""),
 
         ConfigItem("Filename",
                    "filenameFormat",
@@ -148,8 +151,10 @@ class PixivConfig():
 
         ConfigItem("Pixiv", "numberOfPage", 0),
         ConfigItem("Pixiv", "r18mode", False),
+        ConfigItem("Pixiv", "r18Type", 0),  # Issue #439
         ConfigItem("Pixiv", "dateFormat", ""),
         ConfigItem("Pixiv", "autoAddMember", False),
+        ConfigItem("Pixiv", "aiDisplayFewer", False),
 
         ConfigItem("FANBOX", "filenameFormatFanboxCover",
                    "FANBOX %artist% (%member_id%)" + os.sep + "%urlFilename% - %title%",
@@ -173,29 +178,33 @@ class PixivConfig():
         ConfigItem("FFmpeg", "ffmpeg", "ffmpeg.exe"),
         ConfigItem("FFmpeg", "ffmpegCodec", "libvpx-vp9"),
         ConfigItem("FFmpeg", "ffmpegExt", "webm"),
-        ConfigItem("FFmpeg", "ffmpegParam", "-row-mt 1 -deadline good -crf 20 -vsync 2 -r 999 -pix_fmt yuv420p"),
+        ConfigItem("FFmpeg", "ffmpegParam", "-lossless 0 -crf 15 -b 0 -vsync 0"),
+        ConfigItem("FFmpeg", "mkvCodec", "copy"),
+        ConfigItem("FFmpeg", "mkvParam", ""),
         ConfigItem("FFmpeg", "webpCodec", "libwebp"),
-        ConfigItem("FFmpeg", "webpParam", "-row-mt 1 -lossless 0 -q:v 90 -loop 0 -vsync 2 -r 999"),
+        ConfigItem("FFmpeg", "webpParam", "-lossless 0 -compression_level 5 -quality 100 -loop 0 -vsync 0"),
         ConfigItem("FFmpeg", "gifParam",
-                   "-filter_complex \"[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle\""),
-        ConfigItem("FFmpeg", "apngParam", "-vf \"setpts=PTS-STARTPTS,hqdn3d=1.5:1.5:6:6\" -plays 0"),
+                   "-filter_complex [0:v]split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle -vsync 0"),
+        ConfigItem("FFmpeg", "apngParam", "-plays 0 -vsync 0"),
         ConfigItem("FFmpeg", "verboseOutput", False),
 
         ConfigItem("Ugoira", "writeUgoiraInfo", False),
         ConfigItem("Ugoira", "createUgoira", False),
-        ConfigItem("Ugoira", "deleteZipFile", False),
+        ConfigItem("Ugoira", "createMkv", False),
+        ConfigItem("Ugoira", "createWebm", False),
+        ConfigItem("Ugoira", "createWebp", False),
         ConfigItem("Ugoira", "createGif", False),
         ConfigItem("Ugoira", "createApng", False),
         ConfigItem("Ugoira", "deleteUgoira", False),
-        ConfigItem("Ugoira", "createWebm", False),
-        ConfigItem("Ugoira", "createWebp", False),
+        ConfigItem("Ugoira", "deleteZipFile", False),
 
         ConfigItem("DownloadControl", "minFileSize", 0),
         ConfigItem("DownloadControl", "maxFileSize", 0),
+        ConfigItem("DownloadControl", "checkLastModified", True),
+        ConfigItem("DownloadControl", "alwaysCheckFileSize", False),
         ConfigItem("DownloadControl", "overwrite", False),
         ConfigItem("DownloadControl", "backupOldFile", False),
         ConfigItem("DownloadControl", "dayLastUpdated", 7),
-        ConfigItem("DownloadControl", "alwaysCheckFileSize", False),
         ConfigItem("DownloadControl", "checkUpdatedLimit", 0),
         ConfigItem("DownloadControl", "useBlacklistTags", False),
         ConfigItem("DownloadControl", "useBlacklistTitles", False),
@@ -204,10 +213,11 @@ class PixivConfig():
         ConfigItem("DownloadControl", "enableInfiniteLoop", False),
         ConfigItem("DownloadControl", "useBlacklistMembers", False),
         ConfigItem("DownloadControl", "downloadResized", False),
-        ConfigItem("DownloadControl", "checkLastModified", True),
         ConfigItem("DownloadControl", "skipUnknownSize", False),
         ConfigItem("DownloadControl", "enablePostProcessing", False),
         ConfigItem("DownloadControl", "postProcessingCmd", ""),
+        ConfigItem("DownloadControl", "extensionFilter", ""),
+        ConfigItem("DownloadControl", "downloadBuffer", 512, restriction=lambda x: int(x) > 0),
     ]
 
     def __init__(self):
@@ -219,14 +229,13 @@ class PixivConfig():
         value = getattr(self, "proxyAddress", None)
         if not value:
             return None
-        match = re.match(r"^(?:(https?|socks[45])://)?([\w.-]+)(:\d+)?$", value)
+        match = re.match(r"^(?:(https?|socks[45]h?)://)?([\w.-]+)(:\d+)?$", value)
         if not match:
             return None
         scheme, netloc, port = match.groups()
         scheme = scheme or "http"
         value = f"{scheme}://{netloc}{port}"
         return {"http": value, "https": value}
-
 
     def loadConfig(self, path=None):
         if path is not None:

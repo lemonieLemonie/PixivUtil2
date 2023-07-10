@@ -30,14 +30,15 @@ from typing import Union
 
 import mechanize
 from colorama import Fore, Style
+from PIL import Image, ImageFile
 
+import PixivArtist
 import PixivConstant
 from PixivException import PixivException
-import PixivArtist
 from PixivImage import PixivImage
 from PixivModelFanbox import FanboxArtist, FanboxPost
 
-logger = None
+__logger = None
 _config = None
 __re_manga_index = re.compile(r'_p(\d+)')
 __badchars__ = None
@@ -58,6 +59,7 @@ else:
     ''', re.VERBOSE)
 
 __custom_sanitizer_dic__ = {}
+__ansi_color = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 def set_config(config):
@@ -65,25 +67,38 @@ def set_config(config):
     _config = config
 
 
-def get_logger(level=logging.DEBUG):
+def get_logger(level=None, reload=False):
     '''Set up logging'''
-    global logger
-    if logger is None:
+    global __logger
+    if reload:
+        __logger = None
+
+    if __logger is None:
         script_path = module_path()
-        logger = logging.getLogger('PixivUtil' + PixivConstant.PIXIVUTIL_VERSION)
-        logger.setLevel(level)
-        __logHandler__ = logging.handlers.RotatingFileHandler(script_path + os.sep + PixivConstant.PIXIVUTIL_LOG_FILE,
-                                                              maxBytes=PixivConstant.PIXIVUTIL_LOG_SIZE,
-                                                              backupCount=PixivConstant.PIXIVUTIL_LOG_COUNT,
-                                                              encoding="utf-8")
-        __formatter__ = logging.Formatter(PixivConstant.PIXIVUTIL_LOG_FORMAT)
-        __logHandler__.setFormatter(__formatter__)
-        logger.addHandler(__logHandler__)
-    return logger
+        __logger = logging.getLogger('PixivUtil' + PixivConstant.PIXIVUTIL_VERSION)
+        if _config is None or _config.disableLog:
+            logging.disable()
+            if _config is not None and _config.disableLog:
+                print(f"{Fore.RED}Log Disabled!{Style.RESET_ALL}")
+        else:
+            logging.disable(logging.NOTSET)
+            if level is None:
+                level = logging.DEBUG
+                if _config is not None:
+                    level = _config.logLevel
+            __logger.setLevel(level)
+            __logHandler__ = logging.handlers.RotatingFileHandler(script_path + os.sep + PixivConstant.PIXIVUTIL_LOG_FILE,
+                                                                  maxBytes=PixivConstant.PIXIVUTIL_LOG_SIZE,
+                                                                  backupCount=PixivConstant.PIXIVUTIL_LOG_COUNT,
+                                                                  encoding="utf-8")
+            __formatter__ = logging.Formatter(PixivConstant.PIXIVUTIL_LOG_FORMAT)
+            __logHandler__.setFormatter(__formatter__)
+            __logger.addHandler(__logHandler__)
+    return __logger
 
 
 def set_log_level(level):
-    logger.info("Setting log level to: %s", level)
+    get_logger(logging.INFO).info("Setting log level to: %s", level)
     get_logger(level).setLevel(level)
 
 
@@ -194,6 +209,10 @@ def make_filename(nameFormat: str,
     if hasattr(artistInfo, "sketchArtistId"):
         nameFormat = nameFormat.replace('%sketch_member_id%', str(artistInfo.sketchArtistId))
 
+    #  Issue #1117
+    if hasattr(artistInfo, "fanbox_name"):
+        nameFormat = nameFormat.replace('%fanbox_name%', str(artistInfo.fanbox_name))
+
     # image related
     nameFormat = nameFormat.replace('%title%', replace_path_separator(imageInfo.imageTitle))
     nameFormat = nameFormat.replace('%image_id%', str(imageInfo.imageId))
@@ -271,12 +290,18 @@ def make_filename(nameFormat: str,
     # 701
     if useTranslatedTag:
         for idx, tag in enumerate(image_tags):
-            for translated_tags in imageInfo.tags:
+            for translated_tags in imageInfo.tags:  # type: PixivImage.PixivTagData
                 if translated_tags.tag == tag:
                     image_tags[idx] = translated_tags.get_translation(tagTranslationLocale)
                     break
 
     tags = tagsSeparator.join(image_tags)
+
+    # Issue #1226
+    if hasattr(imageInfo, "ai_type") and imageInfo.ai_type == 2:
+        nameFormat = nameFormat.replace('%AI%', 'AI')
+    else:
+        nameFormat = nameFormat.replace('%AI%', '')
 
     r18Dir = ""
     if "R-18G" in imageInfo.imageTags:
@@ -395,6 +420,8 @@ def set_console_title(title):
 
 
 def clearScreen():
+    if _config.disableScreenClear:  # Implement #1162
+        return
     if platform.system() == "Windows":
         subprocess.call('cls', shell=True)
     else:
@@ -413,11 +440,11 @@ def start_irfanview(dfilename, irfanViewPath, start_irfan_slide=False, start_irf
             info.dwFlags = 1
             info.wShowWindow = 6  # start minimized in background (6)
             ivcommand = ivpath + ' /slideshow=' + dfilename
-            logger.info(ivcommand)
+            get_logger().info(ivcommand)
             subprocess.Popen(ivcommand)
         elif start_irfan_view:
             ivcommand = ivpath + ' /filelist=' + dfilename
-            logger.info(ivcommand)
+            get_logger().info(ivcommand)
             subprocess.Popen(ivcommand, startupinfo=info)
     else:
         print_and_log('error', u'could not load' + dfilename)
@@ -516,12 +543,19 @@ def create_avabg_filename(artistModel, targetDir, format_src):
 
 
 def we_are_frozen():
-    """Returns whether we are frozen via py2exe.
-        This will affect how we find out where we are located.
-        Get actual script directory
-        http://www.py2exe.org/index.cgi/WhereAmI"""
+    # """Returns whether we are frozen via py2exe.
+    #     This will affect how we find out where we are located.
+    #     Get actual script directory
+    #     http://www.py2exe.org/index.cgi/WhereAmI"""
 
-    return hasattr(sys, "frozen")
+    # return hasattr(sys, "frozen")
+    ''' updated for PyInstaller from https://pyinstaller.org/en/stable/runtime-information.html'''
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # print('running in a PyInstaller bundle')
+        return True
+    else:
+        # print('running in a normal Python process')
+        return False
 
 
 def module_path():
@@ -598,25 +632,27 @@ def dump_html(filename, html_text):
     return ""
 
 
-def print_and_log(level, msg, exception=None, newline=True, end=None):
+def print_and_log(level, msg, exception: Exception = None, newline=True, end=None):
+    if level is None:
+        safePrint(msg, newline, end)
+        return
+
+    msg_no_color = __ansi_color.sub('', msg)
     if level == 'debug':
-        get_logger().debug(msg)
-    else:
-        if level == 'info':
-            safePrint(msg, newline, end)
-            get_logger().info(msg)
-        elif level == 'warn':
-            safePrint(Fore.YELLOW + f"{msg}" + Style.RESET_ALL, newline, end)
-            get_logger().warning(msg)
-        elif level == 'error':
-            safePrint(Fore.RED + f"{msg}" + Style.RESET_ALL, newline, end)
-            if exception is None:
-                get_logger().error(msg)
-            else:
-                get_logger().error(msg, exception)
+        get_logger().debug(msg_no_color)
+    elif level == 'info':
+        safePrint(msg, newline, end)
+        get_logger().info(msg_no_color)
+    elif level == 'warn':
+        safePrint(Fore.YELLOW + f"{msg}" + Style.RESET_ALL, newline, end)
+        get_logger().warning(msg_no_color)
+    elif level == 'error':
+        safePrint(Fore.RED + f"{msg}" + Style.RESET_ALL, newline, end)
+        if exception is None or not isinstance(exception, Exception) or exception.__traceback__ is None:
+            get_logger().error(msg_no_color)
+        else:
+            get_logger().error(msg_no_color)
             get_logger().error(traceback.format_exc())
-        elif level is None:
-            safePrint(msg, newline, end)
 
 
 def have_strings(page, strings):
@@ -705,10 +741,10 @@ def check_file_exists(overwrite, filename, file_size, old_size, backup_old_file)
         return PixivConstant.PIXIVUTIL_OK
 
 
-def print_delay(retryWait):
-    repeat = range(1, retryWait)
+def print_delay(retry_wait):
+    repeat = range(1, retry_wait + 1)
     for t in repeat:
-        print_and_log(None, f"{t}", newline=False)
+        print_and_log(None, f"\r{t} of {retry_wait}s.", newline=False)
         time.sleep(1)
     print_and_log(None, "")
 
@@ -741,20 +777,23 @@ def makeSubdirs(filename):
 def download_image(url, filename, res, file_size, overwrite):
     ''' Actual download, return the downloaded filesize and saved filename.'''
     start_time = datetime.now()
+    global _config
+    BUFFER_SIZE = _config.downloadBuffer * 1024
 
     # try to save to the given filename + .pixiv extension if possible
     try:
         makeSubdirs(filename)
         save = open(filename + '.pixiv', 'wb+', 4096)
-    except IOError:
-        print_and_log('error', u"Error at download_image(): Cannot save {0} to {1}: {2}".format(url, filename, sys.exc_info()))
+    except IOError as ex:
+        print_and_log('error', f"Error at download_image(): Cannot save {url} to {filename}: {sys.exc_info()}", exception=ex)
+        input("Press enter to continue or Ctrl+C to abort.")  # Issue #1187
 
         # get the actual server filename and use it as the filename for saving to current app dir
         filename = os.path.split(url)[1]
         filename = filename.split("?")[0]
         filename = sanitize_filename(filename)
         save = open(filename + '.pixiv', 'wb+', 4096)
-        print_and_log('info', u'File is saved to ' + filename)
+        print_and_log('info', f'File is saved to {filename}')
 
     # download the file
     prev = 0
@@ -762,22 +801,26 @@ def download_image(url, filename, res, file_size, overwrite):
     msg_len = 0
     try:
         while True:
-            save.write(res.read(PixivConstant.BUFFER_SIZE))
+            save.write(res.read(BUFFER_SIZE))
             curr = save.tell()
             msg_len = print_progress(curr, file_size, msg_len)
 
             # check if downloaded file is complete
             if file_size > 0 and curr == file_size:
                 total_time = (datetime.now() - start_time).total_seconds()
-                print_and_log(None, f' Completed in {total_time}s ({speed_in_str(file_size, total_time)})')
+                print_and_log(None, f' Completed in {Fore.CYAN}{total_time}{Style.RESET_ALL}s ({Fore.RED}{speed_in_str(file_size, total_time)}{Style.RESET_ALL})')
                 break
 
             elif curr == prev:  # no file size info
                 total_time = (datetime.now() - start_time).total_seconds()
-                print_and_log(None, f' Completed in {total_time}s ({speed_in_str(curr, total_time)})')
+                print_and_log(None, f' Completed in {Fore.CYAN}{total_time}{Style.RESET_ALL}s ({Fore.RED}{speed_in_str(curr, total_time)}{Style.RESET_ALL})')
                 break
 
             prev = curr
+    except OSError as ex:
+        print_and_log('error', f"Error at download_image(): Cannot save {url} to {filename}: {sys.exc_info()}", exception=ex)
+        input("Press enter to continue or Ctrl+C to abort.")  # Issue #1187
+        raise
 
     finally:
         if save is not None:
@@ -786,15 +829,15 @@ def download_image(url, filename, res, file_size, overwrite):
         completed = True
         if file_size > 0 and curr < file_size:
             # File size is known and downloaded file is smaller
-            print_and_log('error', u'Downloaded file incomplete! {0:9} of {1:9} Bytes'.format(curr, file_size))
-            print_and_log('error', u'Filename = ' + filename)
-            print_and_log('error', u'URL      = {0}'.format(url))
+            print_and_log('error', f'Downloaded file incomplete! {curr:9} of {file_size:9} Bytes')
+            print_and_log('error', f'Filename = {filename}')
+            print_and_log('error', f'URL      = {url}')
             completed = False
         elif curr == 0:
             # No data received.
-            print_and_log('error', u'No data received!')
-            print_and_log('error', u'Filename = ' + filename)
-            print_and_log('error', u'URL      = {0}'.format(url))
+            print_and_log('error', 'No data received!')
+            print_and_log('error', f'Filename = {filename}')
+            print_and_log('error', f'URL      = {url}')
             completed = False
 
         if completed:
@@ -812,17 +855,21 @@ def download_image(url, filename, res, file_size, overwrite):
 def print_progress(curr, total, max_msg_length=80):
     # [12345678901234567890]
     # [████████------------]
-    animBarLen = 20
+    # [━╸                  ]
+    animBarLen = 40
 
     if total > 0:
         complete = int((curr * animBarLen) / total)
         remainder = (((curr * animBarLen) % total) / total)
         use_half_block = (remainder <= 0.5) and remainder > 0.1
+        color = f"{Fore.GREEN}{Style.BRIGHT}" if complete == animBarLen else Fore.RED
         if use_half_block:
-            with_half_block = f"{'█' * (complete - 1)}▌"
-            msg = f"\r[{with_half_block:{animBarLen}}] {size_in_str(curr)} of {size_in_str(total)}"
+            with_half_block = f"{'━' * (complete - 1)}╸"
+            msg = f"\r{color}[{with_half_block:{animBarLen}}]{Style.RESET_ALL} {size_in_str(curr)} of {size_in_str(total)}"
+        elif complete == animBarLen:
+            msg = f"\r{color}[{'━' * complete:{animBarLen}}]{Style.RESET_ALL} {size_in_str(total)}"
         else:
-            msg = f"\r[{'█' * complete:{animBarLen}}] {size_in_str(curr)} of {size_in_str(total)}"
+            msg = f"\r{color}[{'━' * complete:{animBarLen}}]{Style.RESET_ALL} {size_in_str(curr)} of {size_in_str(total)}"
 
     else:
         # indeterminite
@@ -831,7 +878,7 @@ def print_progress(curr, total, max_msg_length=80):
         # Use nested replacement field to specify the precision value. This limits the maximum print
         # length of the progress bar. As pos changes, the starting print position of the anim string
         # also changes, thus producing the scrolling effect.
-        msg = f'\r[{anim[animBarLen + 3 - pos:]:.{animBarLen}}] {size_in_str(curr)}'
+        msg = f'\r{Fore.YELLOW}[{anim[animBarLen + 3 - pos:]:.{animBarLen}}]{Style.RESET_ALL} {size_in_str(curr)}'
 
     curr_msg_length = len(msg)
     print_and_log(None, msg.ljust(max_msg_length, " "), newline=False)
@@ -849,7 +896,8 @@ def generate_search_tag_url(tags,
                             member_id=None,
                             r18mode=False,
                             blt=0,
-                            type_mode="a"):
+                            type_mode="a",
+                            locale=""):
     url = ""
     date_param = ""
     page_param = ""
@@ -861,8 +909,21 @@ def generate_search_tag_url(tags,
     if page is not None and int(page) > 1:
         page_param = f"&p={page}"
 
+    mode = '&mode=all'
+    if r18mode:
+        mode = '&mode=r18'
+
+    order = ''
+    if sort_order in ('date', 'date_d', 'popular_d', 'popular_male_d', 'popular_female_d'):
+        order = f'&order={sort_order}'
+
+    if locale != "":
+        if locale.startswith("/"):
+            locale = locale[1:]
+        locale = f"&lang={locale}"
+
     if member_id is not None:
-        url = f'https://www.pixiv.net/member_illust.php?id={member_id}&tag={tags}&p={page}'
+        url = f'https://www.pixiv.net/member_illust.php?id={member_id}&tag={tags}&p={page}{mode}{order}'
     else:
         root_url = 'https://www.pixiv.net/ajax/search/artworks'
         search_mode = ""
@@ -890,13 +951,9 @@ def generate_search_tag_url(tags,
         type_mode = f"&type={type_mode}"
 
         # https://www.pixiv.net/ajax/search/artworks/k-on?word=k-on&order=date_d&mode=all&p=1&s_mode=s_tag_full&type=all&lang=en
-        url = f"{root_url}/{tags}?word={tags}{date_param}{page_param}{search_mode}{bookmark_limit_premium}{type_mode}"
-
-    if r18mode:
-        url = f'{url}&mode=r18'
-
-    if sort_order in ('date', 'date_d', 'popular_d', 'popular_male_d', 'popular_female_d'):
-        url = f'{url}&order={sort_order}'
+        # https://www.pixiv.net/ajax/search/artworks/GuP or ガルパン or ガールズ&パンツァー or garupan?word=GuP or ガルパン or ガールズ&パンツァー or garupan
+        # &order=date&mode=all&scd=2022-01-25&p=1&s_mode=s_tag&type=all&lang=en
+        url = f"{root_url}/{tags}?word={tags}{order}{mode}{date_param}{page_param}{search_mode}{bookmark_limit_premium}{type_mode}{locale}"
 
     # encode to ascii
     # url = url.encode('iso_8859_1')
@@ -939,7 +996,7 @@ def ugoira2gif(ugoira_file, exportname, fmt='gif', image=None):
     print_and_log('info', 'Processing ugoira to animated gif...')
     # Issue #802 use ffmpeg to convert to gif
     if len(_config.gifParam) == 0:
-        _config.gifParam = "-filter_complex \"[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle\""
+        _config.gifParam = "-filter_complex [0:v]split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle -vsync 0"
     convert_ugoira(ugoira_file,
                    exportname,
                    ffmpeg=_config.ffmpeg,
@@ -953,7 +1010,7 @@ def ugoira2apng(ugoira_file, exportname, image=None):
     print_and_log('info', 'Processing ugoira to apng...')
     # fix #796 convert apng using ffmpeg
     if len(_config.apngParam) == 0:
-        _config.apngParam = "-vf \"setpts=PTS-STARTPTS,hqdn3d=1.5:1.5:6:6\" -plays 0"
+        _config.apngParam = "-plays 0 -vsync 0"
     convert_ugoira(ugoira_file,
                    exportname,
                    ffmpeg=_config.ffmpeg,
@@ -966,7 +1023,7 @@ def ugoira2apng(ugoira_file, exportname, image=None):
 def ugoira2webp(ugoira_file, exportname, image=None):
     print_and_log('info', 'Processing ugoira to webp...')
     if len(_config.webpParam) == 0:
-        _config.webpParam = "-lossless 0 -q:v 90 -loop 0 -vsync 2 -r 999"
+        _config.webpParam = "-lossless 0 -compression_level 5 -quality 100 -loop 0 -vsync 0"
     convert_ugoira(ugoira_file,
                    exportname,
                    ffmpeg=_config.ffmpeg,
@@ -979,7 +1036,7 @@ def ugoira2webp(ugoira_file, exportname, image=None):
 def ugoira2webm(ugoira_file, exportname, codec="libvpx-vp9", extension="webm", image=None):
     print_and_log('info', 'Processing ugoira to webm...')
     if len(_config.ffmpegParam) == 0:
-        _config.ffmpegParam = "-vsync 2 -r 999 -pix_fmt yuv420p"
+        _config.ffmpegParam = "-lossless 0 -crf 15 -b 0 -vsync 0"
     convert_ugoira(ugoira_file,
                    exportname,
                    ffmpeg=_config.ffmpeg,
@@ -989,34 +1046,33 @@ def ugoira2webm(ugoira_file, exportname, codec="libvpx-vp9", extension="webm", i
                    image=image)
 
 
+def ugoira2mkv(ugoira_file, exportname, codec="copy", image=None):
+    print_and_log('info', 'Processing ugoira to mkv...')
+    convert_ugoira(ugoira_file,
+                   exportname,
+                   ffmpeg=_config.ffmpeg,
+                   codec=codec,
+                   param=_config.mkvParam,
+                   extension="mkv",
+                   image=image)
+
+
 def convert_ugoira(ugoira_file, exportname, ffmpeg, codec, param, extension, image=None):
     ''' modified based on https://github.com/tsudoko/ugoira-tools/blob/master/ugoira2webm/ugoira2webm.py '''
     # if not os.path.exists(os.path.abspath(ffmpeg)):
     #     raise PixivException(f"Cannot find ffmpeg executables => {ffmpeg}", errorCode=PixivException.MISSING_CONFIG)
 
-    d = tempfile.mkdtemp(prefix="convert_ugoira")
-    d = d.replace(os.sep, '/')
-
-    # Issue #1035
-    if not os.path.exists(d):
-        new_temp = os.path.abspath(f"ugoira_{int(datetime.now().timestamp())}")
-        new_temp = new_temp.replace(os.sep, '/')
-        os.makedirs(new_temp)
-        print_and_log("warn", f"Cannot create temp folder at {d}, using current folder as the temp location => {new_temp}")
-        d = new_temp
-        # check again if still fail
-        if not os.path.exists(d):
-            raise PixivException(f"Cannot create temp folder => {d}", errorCode=PixivException.OTHER_ERROR)
+    d = create_temp_dir(prefix="convert_ugoira")
 
     if exportname is None or len(exportname) == 0:
         name = '.'.join(ugoira_file.split('.')[:-1])
         exportname = f"{os.path.basename(name)}.{extension}"
 
-    tempname = d + "/temp." + extension
+    tempname = d + os.sep + "temp." + extension
 
-    cmd = f"{ffmpeg} -y -safe 0 -i \"{d}/i.ffconcat\" -c:v {codec} {param} \"{tempname}\""
+    cmd = f"{ffmpeg} -y -safe 0 -i {d}{os.sep}i.ffconcat -c:v {codec} {param} {tempname}"
     if codec is None:
-        cmd = f"{ffmpeg} -y -safe 0 -i \"{d}/i.ffconcat\" {param} \"{tempname}\""
+        cmd = f"{ffmpeg} -y -safe 0 -i {d}{os.sep}i.ffconcat {param} {tempname}"
 
     try:
         frames = {}
@@ -1025,7 +1081,7 @@ def convert_ugoira(ugoira_file, exportname, ffmpeg, codec, param, extension, ima
         with zipfile.ZipFile(ugoira_file) as f:
             f.extractall(d)
 
-        with open(d + "/animation.json") as f:
+        with open(d + f"{os.sep}animation.json") as f:
             frames = json.load(f)['frames']
 
         for i in frames:
@@ -1035,41 +1091,25 @@ def convert_ugoira(ugoira_file, exportname, ffmpeg, codec, param, extension, ima
         # this will increase the frame count, but will fix the last frame timestamp issue.
         ffconcat += "file " + frames[-1]['file'] + '\n'
 
-        with open(d + "/i.ffconcat", "w") as f:
+        with open(d + f"{os.sep}i.ffconcat", "w") as f:
             f.write(ffconcat)
 
-        ffmpeg_args = shlex.split(cmd)
+        check_image_encoding(d)
+
+        ffmpeg_args = shlex.split(cmd, posix=False)
         get_logger().info(f"[convert_ugoira()] running with cmd: {cmd}")
+        get_logger().info(f"[convert_ugoira()] running with ffmpeg_args: {ffmpeg_args}")
         p = subprocess.Popen(ffmpeg_args, stderr=subprocess.PIPE)
 
         # progress report
-        chatter = ""
         print_and_log('info', f"Start encoding {exportname}")
-        while p.stderr:
-            buff = p.stderr.readline().decode('utf-8').rstrip('\n')
-            chatter += buff
-            if buff.endswith("\r"):
-                if _config.verboseOutput:
-                    print(chatter.strip())
-                elif chatter.find("frame=") > 0 \
-                     or chatter.lower().find("stream") > 0:
-                    print(chatter.strip())
-                elif chatter.lower().find("error") > 0 \
-                     or chatter.lower().find("could not") > 0 \
-                     or chatter.lower().find("unknown") > 0 \
-                     or chatter.lower().find("invalid") > 0 \
-                     or chatter.lower().find("trailing options") > 0 \
-                     or chatter.lower().find("cannot") > 0 \
-                     or chatter.lower().find("can't") > 0:
-                    print_and_log("error", chatter.strip())
-                chatter = ""
-            if len(buff) == 0:
-                break
-
+        p = ffmpeg_progress_report(p)
         ret = p.wait()
 
-        if(p.returncode != 0):
-            print_and_log("error", f"Failed when converting image using {cmd} ==> ffmpeg return exit code={p.returncode}, expected to return 0.")
+        if (p.returncode != 0):
+            msg = f"Failed when converting image using {cmd} ==> ffmpeg return exit code={p.returncode}, expected to return 0."
+            print_and_log("error", msg)
+            raise PixivException(msg, errorCode=PixivException.UGOIRA_CONVERSION_ERROR)  # Issue #1176
         else:
             print_and_log("info", f"- Done with status = {ret}")
             shutil.move(tempname, exportname)
@@ -1086,6 +1126,128 @@ def convert_ugoira(ugoira_file, exportname, ffmpeg, codec, param, extension, ima
         if os.path.exists(d):
             shutil.rmtree(d)
         print()
+
+
+def create_temp_dir(prefix: str = None) -> str:
+    d = tempfile.mkdtemp(prefix=prefix)
+
+    # Issue #1035
+    if not os.path.exists(d):
+        new_temp = os.path.abspath(f"file_{int(datetime.now().timestamp())}")
+        os.makedirs(new_temp)
+        print_and_log("warn", f"Cannot create temp folder at {d}, using current folder as the temp location => {new_temp}")
+        d = new_temp
+        # check again if still fail
+        if not os.path.exists(d):
+            raise PixivException(f"Cannot create temp folder => {d}", errorCode=PixivException.OTHER_ERROR)
+    return d
+
+
+def ffmpeg_progress_report(p: subprocess.Popen) -> subprocess.Popen:
+    chatter = ""
+    while p.stderr:
+        buff = p.stderr.readline().decode('utf-8').rstrip('\n')
+        chatter += buff
+        if buff.endswith("\r"):
+            if _config.verboseOutput:
+                print(chatter.strip())
+            elif chatter.find("frame=") > 0 \
+                    or chatter.lower().find("stream") > 0:
+                print(chatter.strip())
+            elif chatter.lower().find("error") > 0 \
+                    or chatter.lower().find("could not") > 0 \
+                    or chatter.lower().find("unknown") > 0 \
+                    or chatter.lower().find("invalid") > 0 \
+                    or chatter.lower().find("trailing options") > 0 \
+                    or chatter.lower().find("cannot") > 0 \
+                    or chatter.lower().find("can't") > 0 \
+                    or chatter.lower().find("no ") > 0:
+                print_and_log("error", chatter.strip())
+            chatter = ""
+        if len(buff) == 0:
+            break
+    return p
+
+
+# Issue 1109
+def check_image_encoding(directory: str) -> None:
+    """
+    Check if images in the temporary folder have the same amount of component of there bit depth
+    """
+    nb_channel_max = 4
+    dict_of_components = dict()
+    for i in range(nb_channel_max):
+        dict_of_components[i] = list()
+
+    # Append every images to their corresponding number of bit depth in a dictionnary
+    for filename in os.listdir(directory):
+        f = os.path.join(directory + os.sep, filename)
+        # checking if it is a file
+        if ((os.path.isfile(f)) and (f.endswith((".jpg", ".png")))):
+            fp = None
+            try:
+                fp = open(f, "rb")
+                # Fix Issue #269, refer to https://stackoverflow.com/a/42682508
+                ImageFile.LOAD_TRUNCATED_IMAGES = True
+                with Image.open(fp) as im:
+                    nb_components = len(im.getbands())
+                    dict_of_components[nb_components].append(f)
+                    im.close()
+            except BaseException:
+                if fp is not None:
+                    fp.close()
+                print_and_log('error', ' Image {f} invalid during check_image_encoding() , deleting...')
+                os.remove(f)
+                raise
+
+    # Get the maximum amount of component of bit depth from the batch of images and convert thoses below it
+    re_encode = False
+    re_encode_channel = nb_channel_max
+    for i in range(nb_channel_max, 0, -1):
+        if re_encode:
+            for file in dict_of_components[i - 1]:
+                re_encode_image(re_encode_channel, file)
+
+        if (len(dict_of_components[i - 1]) != 0) and not (re_encode):
+            re_encode = True
+            re_encode_channel = i - 1
+
+
+def re_encode_image(nb_channel: int, im_path: str) -> None:
+    """
+    Re-encode image with less component of there bit depth into a greater amount determine by images with the most component of there bit depth
+    """
+    print_and_log("debug", f"Procced to change {im_path} image for a pixel format with {nb_channel} components ")
+
+    # use filters with the most component of bit depth to make sure conversion run smoothly
+    pix_fmt_nb_components = {1: "grayf32be", 2: "ya16be", 3: "gbrpf32be", 4: "gbrapf32be"}
+
+    split_tup = os.path.splitext(im_path)
+    temp_name = f"{split_tup[0]}_temp{split_tup[1]}"
+    # Fix #1126
+    cmd = f"{_config.ffmpeg} -i {im_path} -pix_fmt {pix_fmt_nb_components[nb_channel]} {temp_name}"
+
+    ffmpeg_args = shlex.split(cmd, posix=False)
+    get_logger().info(f"[re_encode_image()] running with cmd: {cmd}")
+    p = subprocess.Popen(ffmpeg_args, stderr=subprocess.PIPE)
+
+    # progress report
+    print_and_log('debug', f"Start re_encoding image {im_path}")
+    p = ffmpeg_progress_report(p)
+    p.wait()
+
+    if (p.returncode != 0):
+        raise PixivException("error", f"Failed when converting image using {cmd} ==> ffmpeg return exit code={p.returncode}, expected to return 0.", errorCode=PixivException.OTHER_ERROR)
+
+    if os.path.exists(im_path) and os.path.exists(temp_name):
+        try:
+            os.remove(im_path)
+            os.rename(temp_name, im_path)
+        except Exception as ex:
+            get_logger().error("[re_encode_image()] Unknown exception: ", ex)
+            raise PixivException(f"Cannot create remove or rename the temp file => {im_path}", errorCode=PixivException.OTHER_ERROR)
+    else:
+        print_and_log("error", f"Failed to modify {im_path} because the file or its re-encoded version {temp_name} does not exist ")
 
 
 def parse_date_time(worksDate, dateFormat):

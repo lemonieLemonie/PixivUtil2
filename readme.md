@@ -30,6 +30,7 @@
 - Download by artist/creator id (FANBOX)
 - Download by post id (FANBOX)
 - Download from followed artists (FANBOX)
+- Re-encoding of all ugoira present in folder
 - Batch Download from batch_job.json (experimental)
   See https://github.com/Nandaka/PixivUtil2/wiki/Using-Batch-Job-(Experimental)
 - Manage database:
@@ -37,6 +38,7 @@
   - Show all downloaded images
   - Export list (member_id only)
   - Export list (detailed)
+  - Export local database (image_id)
   - Show member by last downloaded date
   - Show image by image_id
   - Show member by member_id
@@ -49,6 +51,8 @@
   - Export FANBOX post list
   - Delete FANBOX download history by member_id
   - Delete FANBOX download history by post_id
+  - Delete Sketch download history by member_id
+  - Delete Sketch download history by post_id
   - Clean Up Database (remove db entry if downloaded file is missing)
 - Export user bookmark (member_id) to a text files.
 
@@ -212,6 +216,7 @@ Q3: Error at process_image(): (<type 'exceptions.AttributeError'>,
       id, dump html, and log file (check on the application folder).
 
 Q4: URLError: <urlopen error [Errno 11004] getaddrinfo failed>
+    - Update version to > pixivutil20221029.
     - This is because the Pixiv downloader cannot resolve the address to
       download the images, please try to restart the network connection or do
       ipconfig /flushdns to refresh the dns cache (windows).
@@ -263,7 +268,7 @@ Please refer run with `--help` for latest information.
                             (required: Group ID, limit, and process external[y/n])
                         13 - Download by Manga Series ID
                             (required: Manga Series ID separated by space
-                             optional: --sp=START_PAGE, and --ep=END_PAGE))
+                            optional: --sp=START_PAGE, and --ep=END_PAGE)
                         f1 - Download from supported artists (FANBOX)
                             (optional: End Page)
                         f2 - Download by artist/creator id (FANBOX)
@@ -277,11 +282,13 @@ Please refer run with `--help` for latest information.
                             (optional: End page, path to list)
                         b - Batch Download from batch_job.json (experimental)
                             (optional: --bf=BATCH_FILE)
+                        l - Export local database image_id/post_id
+                            (required: --up=USE_PIXIV, and --uf=USE_FANBOX, and --us=USE_SKETCH)
                         e - Export online bookmark
-                            (required: -p BOOKMARK_FLAG [y/n/o] for private bookmark
-                             optional: filename)
+                            (required: -p BOOKMARK_FLAG [y/n/o] for private bookmark,
+                             optional: --ef=EXPORT_FILENAME)
                         m - Export online user bookmark
-                            (required: member_id, optional: followed by filename)
+                            (required: member_id, optional: --ef=EXPORT_FILENAME)
                         d - Manage database
   -x, --exitwhendone    Exit programm when done.
                         (only useful when DB-Manager)
@@ -332,18 +339,30 @@ Please refer run with `--help` for latest information.
 - numberofpage
 
   Number of page to be processed, put `0` to process all pages.
+  
 - r18mode
 
   Only list images tagged R18, for member, member's bookmark, and search by tag. Set to `True` to enable.
+
+- r18Type
+
+  Allow filtering for R-18 type (R-18 or R-18G)
+  Set `r18Type` with value `0` = both R18 and R-18G, `1` = only R18, or `2` = only R18G
+
 - dateformat
 
   Pixiv DateTime format, leave blank to use default format (YYYY-MM-DD).
   Refer to http://strftime.org/ for syntax. Quick Reference:
   - %d = Day, %m = Month, %Y = Year (4 digit)
   - %H = Hour (24h), %M = Minute, %S = Seconds
+
 - autoAddMember
 
   Automatically save member id to db for all download.
+
+- aiDisplayFewer
+
+  if true, filter out AI-generated images from downloading.
 
 ## [FANBOX]
 - filenameFormatFanboxContent
@@ -494,24 +513,25 @@ Please refer run with `--help` for latest information.
 
   Number of tags to be used for %tags% meta in filename.
   Use -1 to use all tags.
-- writeimageinfo
-
-  Set to `True` to export the image information to text file.
-  The filename is following `filename(Manga)Infoformat` + .txt.
 - writeImageJSON
 
-  Set to `True` to export the image information to JSON.
+  Set to `True` to export the compact image information to JSON file.
   The filename is following `filename(Manga)Infoformat` + .json.
+  If you want the original info from source, use with `writeRawJSON`.
+- writeimageinfo
+
+  Set to `True` to export the compact image information to text file.
+  The filename is following `filename(Manga)Infoformat` + .txt.
+  If you want the original info from source, use with `writeRawJSON`.
 - writeRawJSON
 
-  Set to `True` to export the image JSON untouched.
-  The filename is following `filename(Manga)Infoformat` + .json.
+  Set to `True` to export the original JSON untouched of the image for `writeImageJSON`.
 - RawJSONFilter
 
-  Enter the JSON keys which you want to filter out. Keys are seperated by a comma.
-- writeSeriesJSON
+  Enter the JSON keys which you want to filter out for `writeRawJSON`. Keys are seperated by a comma.
+- includeSeriesJSON
 
-  Set to `True` to export the series information to JSON.
+  Set to `True` to export the series information to JSON. Non-series artwork doesn't have this info.
   The filename is following `filenameSeriesJSON` + .json.
 - writeImageXMP
 
@@ -521,10 +541,10 @@ Please refer run with `--help` for latest information.
   Set to `True` to export the image information to a .XMP sidecar file, one per image in the album. The data contained within the file is the same but some software requires matching file names to detect the metadata. If set to `True`, then `writeImageXMP` is ignored.
 - verifyimage
 
-  Do image and zip checking after download. Set the value to `True` to enable.
+  Check if downloaded files are valid image or zip. Set the value to `True` to enable.
 - writeUrlInDescription
 
-  Write all url found in the image description to a text file. Set to `True` to enable. The list will be saved to to the application folder as url_list_<timestamp>.txt
+  Write all url found in the image description to a text file at the root directory. Set to `True` to enable. The list will be saved to to the application folder as url_list_<timestamp>.txt
 - stripHTMLTagsFromCaption
 
   Remove all HTML tags and their contents from the image caption/description when writing metadata to files. The contents of any links will be lost, so consider enabling writeUrlInDescription to retain them.
@@ -536,10 +556,13 @@ Please refer run with `--help` for latest information.
   Use different database.
 - setLastModified
 
-  Set last modified timestamp based on pixiv upload timestamp.
+  Set last modified timestamp based on pixiv upload timestamp to the file.
 - useLocalTimezone
 
-  Use local timezone when setting last modified timestamp/works date.
+  Use local timezone in the .txt file of `writeimageinfo` and .XMP file of `writeImageXMP`.
+- defaultSketchOption
+
+  Skip the "Include Pixiv Sketch" prompt when downloading by `member_id` option by using a default option. Set the value to `y` to always include sketches or `n` to exclude sketches from the download.
 
 ## [DownloadControl]
 - minFileSize
@@ -548,9 +571,17 @@ Please refer run with `--help` for latest information.
 - maxFileSize
 
   Skip if file size is more than minFileSize, set `0` to disable.
+- checkLastModified
+
+  If the last-modified timestamp of the local files is the same with the uploaded date of the artwork, it'll log "match" and skip to process the current image_id.
+  Require `setlastmodified = True` in config.ini to work properly
+- alwaysCheckFileSize
+
+  Actually, it'll always check the file size. But if `this` is false, if the `overwrite` is also false and this file is recorded in db, it'll skip to process the current image_id.
+  This will override the image_id checking from db (always fetch the image page to check the remote size).
 - overwrite
 
-  Overwrite old files, set `False` to disable.
+  If is true, when found file size different, it'll just delete the file (unless the backupOldFile is true), then start to re-download the image.
 - backupOldFile
 
   Set to True to backup old file if the file size is different.
@@ -558,10 +589,6 @@ Please refer run with `--help` for latest information.
 - daylastupdated
 
   Only process member_id which were processed at least x days since the last check.
-- alwaysCheckFileSize
-
-  Check the file size, if different then it will be downloaded again, set `False` to disable.
-  This will override the image_id checking from db (always fetch the image page to check the remote size).
 - checkUpdatedLimit
 
   Jump to the next member id if already see n-number of previously downloaded images.
@@ -591,63 +618,91 @@ Please refer run with `--help` for latest information.
 - downloadResized
 
   Download the medium size, rather than the original size.
-- checkLastModified
-
-  Compare local file's last-modified timestamp with works date.
-  Require `setlastmodified = True` in config.ini to work properly
 - skipUnknownSize
 
   Skip downloading if the remote size is not known when `alwaysCheckFileSize` is set to True.
 
+- enablePostProcessing
+  
+  If true, it enabled post processing cmd for every downloaded files. Default: False.
+
+- postProcessingCmd
+
+  command to execute. add %filename% to pass the downloaded filename.
+  **NO ERROR HANDLING AT ALL, use on your own risk.**
+
+- extensionFilter
+
+  Provide a | seperated list of acceptable file extensions to download. Eg. jpg|png|gif|ugoira
+
+- downloadBuffer
+
+  Download buffer before it write to disk in kiloByte, default is 512kB.
+  You can change it based on your download speed. Mainly useful for smoother progress bar.
+  Usually no need to change this value.
+
+
 ## [FFmpeg]
 - ffmpeg
 
-  Path to ffmpeg executable.
+  ffmpeg executable path.
 - ffmpegcodec
 
-  Codec to be used for encoding webm, default is using `libvpx-vp9`.
+  Codec to be used for encoding, default is using `libvpx-vp9`.
+- ffmpegExt
+  
+  The file extension (container format) to use for encoding. default: `webm`.
 - ffmpegparam
 
-  Parameter to be used to encode webm. default is `-lossless 1 -vsync 2 -r 999 -pix_fmt yuv420p`
+  Parameter to be used to encode webm, default: `-lossless 0 -crf 15 -b 0 -vsync 0`.
+- mkvcodec
+
+  Codec to be used for encoding mkv, default is using `copy`.
+- mkvparam
+
+  Parameter to be used to encode mkv, default: ` `.
 - webpcodec
 
   Codec to be used for encoding webm, default is using `libwebp`.
 - webpparam
 
-  Parameter to be used to encode webm.
-  default is `lossless 0 -q:v 90 -loop 0 -vsync 2 -r 999`
+  Parameter to be used to encode webm, default: `-lossless 0 -compression_level 5 -quality 100 -loop 0 -vsync 0`.
 
 ## [Ugoira]
 - writeugoirainfo
 
-  If set to `True`, it will dump the .js to external file.
+  If set to `True`, it will write the info of ugoira frames to a `filename(Manga)Infoformat`+.zip.js file. `writeImageJSON` contains this info as well.
 - createugoira
 
   If set to `True`, it will create .ugoira file.
   This is Pixiv own format for animated images. You can use Honeyview to see the animation.
-- deleteZipFile
+- createmkv
 
-  If set to `True`, it will delete the zip files from ugoira.
-  Only active if `createUgoira = True`.
-- creategif
-
-  Set to True to convert ugoira file to gif.
+  Set to True to create mkv file (video format). The default settings is lossless(no encoding), it will pack the images in the container. Very large file size.
   Required `createUgoira = True` and ffmpeg executeable.
-- createapng
-
-  Set to True to convert ugoira file to animated png.
-  Required `createUgoira = True` and ffmpeg executeable.
-- deleteugoira
-
-  Set to True to delete original ugoira after conversion.
 - createwebm
 
-  Set to True to create webm file (video format).
+  Set to True to create webm file (video format). The default encoding settings is lossy encoding but high quality with smallest file size.
   Required `createUgoira = True` and ffmpeg executeable.
 - createwebp
 
-  Set to True to create webp file (image format).
+  Set to True to create webp file (image format). The default encoding settings is lossy encoding but high quality with smaller file size.
   Required `createUgoira = True` and ffmpeg executeable.
+- creategif
+
+  Set to True to convert ugoira file to gif. The default encoding settings is lossy encoding but moderate quality with smaller file size.
+  Required `createUgoira = True` and ffmpeg executeable.
+- createapng
+
+  Set to True to convert ugoira file to animated png. The default encoding settings is lossless encoding but very large file size.
+  Required `createUgoira = True` and ffmpeg executeable.
+- deleteugoira
+
+  Set to True to delete the created .ugoira after conversion.
+- deleteZipFile
+
+  If set to `True`, it will delete the orignal .zip (i.e. the actual image) file.
+  Only active if `createUgoira = True`.
 
 ## [Filename]
 - filenameformat
@@ -692,6 +747,9 @@ Please refer run with `--help` for latest information.
 
   For sanitizing filenames with custom rules. Supports regular expressions.
   For detailed syntax, please refer to 'Bad chars' section.
+- customCleanUpRe
+  
+  TODO.
 
 # Filename Format Syntax
 Available for filenameFormat, filenameMangaFormat, avatarNameFormat, filenameInfoFormat,
@@ -715,7 +773,7 @@ filenameFormatFanboxCover, filenameFormatFanboxContent and filenameFormatFanboxI
 Available for filenameFormat and filenameMangaFormat:
 ```
 -> %image_id%
-   Image id, in number.
+   Image id, in number. (Post id for FANBOX and sketches)
 -> %title%
    Image title, usually in japanese character.
 -> %tags%
@@ -738,9 +796,9 @@ Available for filenameFormat and filenameMangaFormat:
 -> %page_big%
    for manga mode, add big in the filename.
 -> %page_index%
-   for manga mode, add page number with 0-index.
+   for manga mode, add page number with 0-index. It will auto-pad with 0 based on the total count.
 -> %page_number%
-   for manga mode, add page number with 1-index.
+   for manga mode, add page number with 1-index. It will auto-pad with 0 based on the total count.
 -> %bookmark%
    for bookmark mode, add 'Bookmarks' string.
 -> %original_member_id%
@@ -761,11 +819,19 @@ Available for filenameFormat and filenameMangaFormat:
    original manga series id.
 -> %manga_series_title%
    original manga series title, different from work title.
+-> %AI%
+   Add 'AI' for AI-generated images (aiType==2).
 ```
 Specific for PixivSketch (option 1 if PixivSketch included, s1, and s2 ):
 ```
 -> %sketch_member_id%
    Pixiv Sketch artist id, might be different from Pixiv's artist id.
+```
+Specific for Fanbox:
+```
+-> %fanbox_name%
+   Fanbox name, might be different from Pixiv's artist name.
+   Useful if the artist is suspended from Pixiv and there is no record in the DB to avoid interuption.
 ```
 # list.txt Format
 - This file should be build in the following way, white space will be trimmed,
@@ -923,6 +989,13 @@ http://www.pixiv.net/member_illust.php?id=123456
 %pattern<unicode>([\U0001d400-\U0001ffff])%%pattern<1>(_+)%%replace<1>(_)%
 ```
 
+# Development
+PixivUtil2 posesses robust test suite. To run it, one needs pytest suite:
+```
+pip install --user pytest
+
+pytest -v ./test_*
+```
 
 # Credits/Contributor
 - Nandaka (Main Developer) - https://nandaka.devnull.zone
